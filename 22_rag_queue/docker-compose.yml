@@ -1,0 +1,10 @@
+# we also need db (qdrant) for this example, so we can reuse the same docker-compose file as before
+#since we already have a db running we only need redis but for this course we will be using valkey
+# valkey is a redis compatible in-memory database that we can use for our queue
+
+services:
+  valkey:
+    image: valkey/valkey
+    ports:
+      - 6379:6379
+    
