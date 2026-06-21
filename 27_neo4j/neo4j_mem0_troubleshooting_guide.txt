@@ -1,0 +1,308 @@
+=============================================================
+STARTING A NEW NEO4J + MEM0 PROJECT FROM SCRATCH
+=============================================================
+
+STEP 1: INSTALL CORRECT VERSIONS
+=============================================================
+pip install mem0ai==0.1.115
+pip install openai
+pip install python-dotenv
+pip install neo4j
+pip install qdrant-client
+pip install langchain-neo4j
+pip install rank-bm25
+
+IMPORTANT: Do NOT install the latest mem0ai. 
+v2.0+ has removed Neo4j support entirely.
+Always use mem0ai==0.1.115 for Neo4j graph memory.
+
+=============================================================
+STEP 2: CREATE AURADB INSTANCE
+=============================================================
+1. Go to https://console.neo4j.io
+2. Click "New Instance" → choose Free tier
+3. Wait for instance to be created (can take 1-2 minutes)
+4. Download or copy the credentials shown — you only see 
+   them ONCE. They look like this:
+
+   NEO4J_URI=neo4j+s://xxxxxxxx.databases.neo4j.io
+   NEO4J_USERNAME=xxxxxxxx
+   NEO4J_PASSWORD=some-generated-password
+   NEO4J_DATABASE=xxxxxxxx
+   AURA_INSTANCEID=xxxxxxxx
+   AURA_INSTANCENAME=Free instance
+
+CRITICAL NOTES ABOUT AURADB CREDENTIALS:
+- The USERNAME is the instance ID (e.g. "2b529fd6"), NOT "neo4j"
+- The DATABASE is also the same instance ID, NOT "neo4j"
+- The PASSWORD is auto-generated — save it immediately
+- If you reset password from console, update your .env file
+
+=============================================================
+STEP 3: CREATE .env FILE
+=============================================================
+Create a .env file in your project folder with these fields:
+
+    OPENAI_API_KEY=sk-proj-your-openai-key-here
+    NEO4J_URI=neo4j+s://xxxxxxxx.databases.neo4j.io
+    NEO4J_USERNAME=xxxxxxxx
+    NEO4J_PASSWORD=your-auradb-password
+    NEO4J_DATABASE=xxxxxxxx
+
+RULES:
+- NEVER hardcode these values directly in your Python files
+- NEVER share your .env file or paste its contents anywhere
+- Add .env to your .gitignore if using Git
+- Replace xxxxxxxx with your actual instance ID throughout
+
+=============================================================
+STEP 4: PATCH langchain_neo4j (ONE TIME SETUP)
+=============================================================
+This patch is REQUIRED on Windows due to SSL certificate issues.
+You only need to do this once per virtual environment.
+
+Find this file:
+    <your_venv>\Lib\site-packages\langchain_neo4j\graphs\neo4j_graph.py
+
+PATCH A — Replace the driver creation block:
+Find:
+    self._driver = neo4j.GraphDatabase.driver(
+        url, auth=auth, user_agent=user_agent, **(driver_config or {})
+    )
+
+Replace with:
+    _url = (
+        url
+        .replace("neo4j+s://", "neo4j+ssc://")
+        .replace("neo4j://", "neo4j+ssc://")
+    )
+    self._driver = neo4j.GraphDatabase.driver(
+        _url, auth=auth, user_agent=user_agent, **(driver_config or {})
+    )
+
+PATCH B — Replace the connectivity check block:
+Find:
+    try:
+        self._driver.verify_connectivity()
+    except neo4j.exceptions.ConfigurationError:
+        raise ValueError(...)
+    except neo4j.exceptions.ServiceUnavailable:
+        raise ValueError(...)
+    except neo4j.exceptions.AuthError:
+        raise ValueError(...)
+
+Replace with:
+    try:
+        with self._driver.session(database=self._database) as _session:
+            _session.run("RETURN 1").consume()
+    except Exception:
+        pass  # Driver will be replaced by graph_memory.py
+
+=============================================================
+STEP 5: PATCH mem0 graph_memory.py (ONE TIME SETUP)
+=============================================================
+Find this file:
+    <your_venv>\Lib\site-packages\mem0\memory\graph_memory.py
+
+Find this block inside __init__:
+    self.graph = Neo4jGraph(
+        self.config.graph_store.config.url,
+        self.config.graph_store.config.username,
+        self.config.graph_store.config.password,
+        self.config.graph_store.config.database,
+        refresh_schema=False,
+        driver_config={"notifications_min_severity": "OFF"},
+    )
+
+Replace with:
+    from neo4j import GraphDatabase
+    _neo4j_driver = GraphDatabase.driver(
+        "neo4j+ssc://" + self.config.graph_store.config.url.split("://")[1],
+        auth=(
+            self.config.graph_store.config.username,
+            self.config.graph_store.config.password,
+        )
+    )
+    self.graph = Neo4jGraph(
+        self.config.graph_store.config.url,
+        self.config.graph_store.config.username,
+        self.config.graph_store.config.password,
+        self.config.graph_store.config.database,
+        refresh_schema=False,
+        driver_config={"notifications_min_severity": "OFF"},
+    )
+    self.graph._driver = _neo4j_driver
+    self.graph._database = self.config.graph_store.config.database
+
+=============================================================
+STEP 6: START QDRANT (VECTOR STORE)
+=============================================================
+Qdrant must be running locally before you start your script.
+Run this in a separate terminal using Docker:
+
+    docker run -p 6333:6333 qdrant/qdrant
+
+Or if you have Qdrant installed locally, just start it.
+Verify it is running by visiting: http://localhost:6333
+
+=============================================================
+STEP 7: VERIFY NEO4J CONNECTION BEFORE WRITING CODE
+=============================================================
+Always test your Neo4j connection first with this script:
+
+    from neo4j import GraphDatabase
+
+    driver = GraphDatabase.driver(
+        "neo4j+ssc://xxxxxxxx.databases.neo4j.io",
+        auth=("xxxxxxxx", "your-password")
+    )
+    with driver.session(database="xxxxxxxx") as session:
+        result = session.run("RETURN 1 AS test")
+        print(result.single())
+    driver.close()
+
+If it prints <Record test=1> you are good to proceed.
+If it fails, check your credentials or reset password from AuraDB console.
+
+=============================================================
+STEP 8: PROJECT FILE STRUCTURE
+=============================================================
+your_project/
+    main.py          ← your main application code
+    .env             ← all secrets and credentials
+    .gitignore       ← add .env here if using Git
+    requirements.txt ← list of packages
+
+requirements.txt contents:
+    mem0ai==0.1.115
+    openai
+    python-dotenv
+    neo4j
+    qdrant-client
+    langchain-neo4j
+    rank-bm25
+
+=============================================================
+STEP 9: TEMPLATE main.py FOR ANY NEW PROJECT
+=============================================================
+
+from mem0 import Memory
+from dotenv import load_dotenv
+from openai import OpenAI
+import json
+import os
+
+load_dotenv()
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+client = OpenAI(api_key=OPENAI_API_KEY)
+
+config = {
+    "version": "v1.1",
+    "embedder": {
+        "provider": "openai",
+        "config": {
+            "api_key": OPENAI_API_KEY,
+            "model": "text-embedding-3-small"
+        }
+    },
+    "llm": {
+        "provider": "openai",
+        "config": {
+            "api_key": OPENAI_API_KEY,
+            "model": "gpt-4o"
+        }
+    },
+    "graph_store": {
+        "provider": "neo4j",
+        "config": {
+            "url": os.getenv("NEO4J_URI"),
+            "username": os.getenv("NEO4J_USERNAME"),
+            "password": os.getenv("NEO4J_PASSWORD"),
+            "database": os.getenv("NEO4J_DATABASE")
+        }
+    },
+    "vector_store": {
+        "provider": "qdrant",
+        "config": {
+            "host": "localhost",
+            "port": 6333
+        }
+    },
+    "enable_graph": True
+}
+
+memory_client = Memory.from_config(config)
+USER_ID = "your_unique_user_id"  # change this per user
+
+while True:
+    user_query = input("Enter the query: ")
+
+    # Search existing memories
+    search_memory = memory_client.search(query=user_query, user_id=USER_ID)
+    memories = [
+        f"ID:{mem.get('id')}\nMemory: {mem.get('memory')}"
+        for mem in search_memory["results"]
+    ]
+    print("Found memories:", memories)
+
+    # Build system prompt with memory context
+    SYSTEM_PROMPT = f"""
+    You are a helpful assistant with memory about the user.
+    Here is the context about the user:
+    {json.dumps(memories)}
+    """
+
+    # Get AI response
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_query}
+        ]
+    )
+
+    ai_response = response.choices[0].message.content
+    print("AI message:", ai_response)
+
+    # Save to memory
+    memory_client.add(
+        messages=[
+            {"role": "user", "content": user_query},
+            {"role": "assistant", "content": ai_response}
+        ],
+        user_id=USER_ID
+    )
+
+    print("Memory saved.")
+
+=============================================================
+KEY RULES TO ALWAYS FOLLOW
+=============================================================
+1. Always use mem0ai==0.1.115 — never upgrade for Neo4j support
+2. Always patch neo4j_graph.py and graph_memory.py after install
+3. Always store credentials in .env — never hardcode them
+4. Always use os.getenv() to read credentials
+5. Always run the standalone connection test before main code
+6. Always make sure Qdrant is running before starting the script
+7. Use named entity queries to create graph nodes
+   (people, places, organizations — not generic questions)
+8. The DATABASE name in AuraDB is the instance ID, not "neo4j"
+9. If you create a new AuraDB instance, update ALL four values
+   in .env: URI, USERNAME, PASSWORD, DATABASE
+10. If AuthError appears, your password may have been reset —
+    go to console.neo4j.io and generate a new password
+
+=============================================================
+CHECKLIST BEFORE RUNNING ANY NEW PROJECT
+=============================================================
+[ ] mem0ai==0.1.115 installed
+[ ] neo4j_graph.py patched (URL + connectivity check)
+[ ] graph_memory.py patched (driver replacement)
+[ ] .env file created with all 5 keys
+[ ] Qdrant running on localhost:6333
+[ ] Standalone Neo4j connection test passes
+[ ] main.py reads all credentials from os.getenv()
+[ ] USER_ID set to a meaningful unique identifier
+
+=============================================================
